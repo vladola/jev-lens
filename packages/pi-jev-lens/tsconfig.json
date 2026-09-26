@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "jev-lens": ["../core/src/index.ts"]
+    }
+  },
+  "include": [
+    "index.ts",
+    "src/**/*.ts",
+    "test/**/*.ts"
+  ]
+}

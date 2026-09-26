@@ -72,31 +72,34 @@ Three results shaped the design:
 
 ## What jev costs
 
-Every jev response reports the tokens it consumed, so the extension counts its own spend instead of estimating it.
-jev is billed for input only: TypeSafe publishes $0.042 per million input tokens for jev-latest and does not charge
-for output. A decision that needs both steps (`choose`, then `expand`) sends roughly 5.5k input tokens, about
-$0.0002 — a fraction of what it keeps out of the prompt, and it is paid once while the saving is paid on every
-later call that would have carried those tokens.
+The number in `/jev-lens stats` is the provider's, not arithmetic: every `systemOne` response carries the charge
+for that call in `usage.cost`, and the extension adds them up as they happen. Measured against real calls, that
+charge is proportional to input tokens — 333 tokens cost $0.0000140 and 2,283 cost $0.0000959, both exactly
+$0.042 per million, output free — so it is a per-token price, not a fee per call. A decision that runs both steps
+(`choose`, then `expand`) sends around 2.6k input tokens and costs about $0.00011; it is paid once, while the tokens
+it keeps out of the prompt are saved on every later call that would have carried them.
 
-`/jev-lens stats` prints it, for this session and for the project:
+Stats print it for this session and for the project:
 
 ```text
-cost: 4 jev calls (choose 3, expand 1) · 11,802 in / 332 out tokens ≈ $0.000496 at $0.042/M in, $0/M out
-lifetime (this project's log): 143 jev calls over 26 sessions · 441,905 in / 9,410 out tokens ≈ $0.0186
-openrouter: key usage $114.9130 (today $0.0582, month $3.6249) — every request on this key, not only jev
+cost: 4 jev calls (choose 3, expand 1) · 11,802 in / 332 out tokens · $0.000496 charged
+lifetime (this project's log): 143 jev calls over 26 sessions · 441,905 in / 9,410 out tokens · $0.0186 charged
 ```
 
-- The first line is this session, summed from the `usage` on each response.
-- The second is every session this project has logged: each call is appended to `.pi/jev-lens.log` as a `jev_call`
-  event, so the total survives restarts.
-- The third appears only on the OpenRouter gateway, and it is OpenRouter's own figure rather than arithmetic: the
-  key endpoint reports what the account has spent. It covers every request that key makes, and
-  `typesafe/jev-router` is listed as free there, so treat it as context rather than as jev's bill. Per-model and
-  per-generation breakdowns need a management key, and the SDK does not return a generation id.
+- The first line is this session, summed from each response. The second totals every session this project has
+  logged: each call is appended to `.pi/jev-lens.log` as a `jev_call` event, so the total survives restarts.
+- `charged` means every call reported a cost, which the SDK does. A log line written before the cost was recorded
+  carries no charge, so those tokens are priced at the rates instead and the line says so:
+  `$0.000084 (1/2 charged, the rest at $0.042/M in)`.
+- A **key-wide** figure — OpenRouter's `GET /v1/key`, for instance — is deliberately not shown. It reports what the
+  key spent on everything, so a key that does other work returns a number off by orders of magnitude: that endpoint
+  keeps growing while jev-lens sits idle, and its lifetime total has nothing to do with jev. Attributing it is not
+  possible either (per-model breakdowns need a management key, and the SDK returns no generation id), so: per call,
+  or not at all.
 
-If you are billed differently — a negotiated rate, or a provider that charges for output — set
-`JEV_LENS_PRICE_IN_PER_M`, `JEV_LENS_PRICE_OUT_PER_M` and `JEV_LENS_PRICE_PER_CALL`. A value that is not a number is
-ignored rather than priced at zero, so a typo cannot make the estimate read as free.
+If a provider reports tokens but no charge, the rate table prices the call:
+`JEV_LENS_PRICE_IN_PER_M`, `JEV_LENS_PRICE_OUT_PER_M` and `JEV_LENS_PRICE_PER_CALL` override the published table. A
+value that is not a number is ignored rather than priced as zero, so a typo cannot make the cost read as free.
 
 ## Install
 
@@ -251,7 +254,7 @@ custom savings headers and tool overrides.
 | `JEV_LENS_PRESEND_MIN_CONFIDENCE` | `0` | send full below this choice confidence. `0` turns the check off |
 | `JEV_LENS_PRESEND_WAIT_MS` | `5000` | abandon the pre-send decision past this and send the full text. `0` never waits |
 | `JEV_LENS_MODEL` | `jev-latest` | the jev model |
-| `JEV_LENS_PRICE_IN_PER_M` / `_OUT_PER_M` / `_PER_CALL` | `0.042` / `0` / `0` | USD rates used to price jev's own calls in `/jev-lens stats`, overriding the published table |
+| `JEV_LENS_PRICE_IN_PER_M` / `_OUT_PER_M` / `_PER_CALL` | `0.042` / `0` / `0` | rates used only when a provider reports tokens without a charge, overriding the published table |
 | `JEV_LENS_CLASSIFIER` | unset | `mock` forces the deterministic classifier, with no API calls |
 | `JEV_LENS_LOG` | `1` | `0` turns logging off |
 | `JEV_LENS_UI` | `1` | `0` turns the custom tool rendering off |

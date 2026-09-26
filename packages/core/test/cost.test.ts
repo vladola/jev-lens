@@ -1,7 +1,7 @@
 /**
- * What the jev calls cost: the SDK reports tokens on every response, the rates come from TypeSafe's
- * published table unless JEV_LENS_PRICE_* overrides them, and on the OpenRouter gateway the account's
- * real spend is fetched from the key endpoint instead of being estimated.
+ * What the jev calls cost: the SDK reports tokens on every response and, on every provider we have seen,
+ * the charge for the call as `usage.cost`. That figure is used as-is; the rates below (TypeSafe's published
+ * table unless JEV_LENS_PRICE_* overrides them) only price a call whose provider reports tokens but no charge.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -15,7 +15,7 @@ vi.mock("@typesafe-ai/sdk", () => ({
 }));
 
 import {
-	estimateUsd, fetchOpenRouterKeyUsage, formatUsd, isOpenRouter, JevClassifier, JevPresend, PUBLISHED_RATES,
+	estimateUsd, formatUsd, JevClassifier, JevPresend, PUBLISHED_RATES,
 	recordJevCall, resolveRates, type JevUsageSample,
 } from "../src/index.ts";
 
@@ -63,29 +63,39 @@ describe("formatUsd", () => {
 	});
 });
 
-describe("isOpenRouter", () => {
-	it("recognises the gateway however the root is written", () => {
-		for (const url of ["https://openrouter.ai", "https://openrouter.ai/api", "https://openrouter.ai/api/", "  https://openrouter.ai/api  "]) {
-			expect(isOpenRouter(url), url).toBe(true);
-		}
-	});
-
-	it("does not mistake another host for it, and tolerates nonsense", () => {
-		for (const url of ["https://api.typesafe.ai", "https://openrouter.ai.example.com/api", "not a url", "", undefined]) {
-			expect(isOpenRouter(url), String(url)).toBe(false);
-		}
-	});
-});
-
 describe("recordJevCall", () => {
 	it("passes one sample per call through, counting a response that omits usage", () => {
 		const seen: JevUsageSample[] = [];
-		recordJevCall((s) => seen.push(s), "classify", { model: "jev-latest", usage: { input_tokens: 10, output_tokens: 2 } }, 5);
+		recordJevCall((s) => seen.push(s), "classify", { model: "jev-latest", usage: { input_tokens: 10, output_tokens: 2, cost: 0.00000042 } }, 5);
 		recordJevCall((s) => seen.push(s), "choose", {}, 7);
 		expect(seen).toEqual([
-			{ stage: "classify", input: 10, output: 2, model: "jev-latest", ms: 5 },
-			{ stage: "choose", input: 0, output: 0, model: "", ms: 7 },
+			{ stage: "classify", input: 10, output: 2, usd: 0.00000042, reported: true, model: "jev-latest", ms: 5 },
+			{ stage: "choose", input: 0, output: 0, usd: 0, reported: false, model: "", ms: 7 },
 		]);
+	});
+
+	it("takes the provider's own charge rather than recomputing it", () => {
+		const seen: JevUsageSample[] = [];
+		// What a real call answered with: 333 input tokens billed at the published rate.
+		recordJevCall((s) => seen.push(s), "classify", { usage: { input_tokens: 333, output_tokens: 22, cost: 0.000013986 } }, 300);
+		expect(seen[0].usd).toBe(0.000013986);
+		expect(seen[0].reported).toBe(true);
+	});
+
+	it("prices the call at the rates when the provider reports tokens but no charge", () => {
+		const seen: JevUsageSample[] = [];
+		recordJevCall((s) => seen.push(s), "choose", { usage: { input_tokens: 1_000_000, output_tokens: 9 } }, 300);
+		expect(seen[0].usd).toBeCloseTo(0.042, 12);
+		expect(seen[0].reported).toBe(false);
+	});
+
+	it("treats a nonsense charge as a missing one, never as free", () => {
+		const seen: JevUsageSample[] = [];
+		recordJevCall((s) => seen.push(s), "choose", { usage: { input_tokens: 1_000_000, cost: Number.NaN } }, 300);
+		recordJevCall((s) => seen.push(s), "expand", { usage: { input_tokens: 1_000_000, cost: -5 } }, 300);
+		expect(seen.map((s) => s.reported)).toEqual([false, false]);
+		expect(seen[0].usd).toBeCloseTo(0.042, 12);
+		expect(seen[1].usd).toBeCloseTo(0.042, 12);
 	});
 
 	it("does nothing without a meter", () => {
@@ -130,33 +140,3 @@ describe("metering the pipeline", () => {
 	});
 });
 
-describe("OpenRouter's own numbers", () => {
-	it("asks the key endpoint and returns what OpenRouter reports", async () => {
-		const calls: { url: string; init: any }[] = [];
-		vi.stubGlobal("fetch", async (url: string, init: any) => {
-			calls.push({ url, init });
-			return { ok: true, json: async () => ({ data: { usage: 114.91, usage_daily: 0.05, usage_weekly: 0.05, usage_monthly: 3.62 } }) };
-		});
-		const usage = await fetchOpenRouterKeyUsage({ apiKey: "sk-or-test", baseURL: "https://openrouter.ai/api" });
-		expect(usage).toEqual({ usage: 114.91, usageDaily: 0.05, usageWeekly: 0.05, usageMonthly: 3.62 });
-		expect(calls[0].url).toBe("https://openrouter.ai/api/v1/key");
-		expect(calls[0].init.headers.Authorization).toBe("Bearer sk-or-test");
-	});
-
-	it("returns nothing instead of throwing when the endpoint fails or answers oddly", async () => {
-		vi.stubGlobal("fetch", async () => ({ ok: false, json: async () => ({}) }));
-		expect(await fetchOpenRouterKeyUsage({ apiKey: "k", baseURL: "https://openrouter.ai/api" })).toBeUndefined();
-		vi.stubGlobal("fetch", async () => { throw new Error("offline"); });
-		expect(await fetchOpenRouterKeyUsage({ apiKey: "k", baseURL: "https://openrouter.ai/api" })).toBeUndefined();
-		vi.stubGlobal("fetch", async () => ({ ok: true, json: async () => ({ data: { no_usage: true } }) }));
-		expect(await fetchOpenRouterKeyUsage({ apiKey: "k", baseURL: "https://openrouter.ai/api" })).toBeUndefined();
-	});
-
-	it("does nothing at all without a key or an endpoint", async () => {
-		const spy = vi.fn();
-		vi.stubGlobal("fetch", spy);
-		expect(await fetchOpenRouterKeyUsage({ baseURL: "https://openrouter.ai/api" })).toBeUndefined();
-		expect(await fetchOpenRouterKeyUsage({ apiKey: "k" })).toBeUndefined();
-		expect(spy).not.toHaveBeenCalled();
-	});
-});

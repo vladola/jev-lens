@@ -19,10 +19,10 @@ import { createBashToolDefinition, createFindToolDefinition, createGrepToolDefin
 import { Text } from "@earendil-works/pi-tui";
 import { ComparisonResult, comparisonHint, listLines, savingsLine, type CompressedRecord } from "./src/ui.ts";
 import {
-	buildItemState, contentText, createPresend, describeToolCall, estimateTokensOfText, estimateUsd, fetchOpenRouterKeyUsage,
-	formatUsd, Health, isOpenRouter, JevClassifier, keyFilePath, Lens, loadConfigWithVariant, MockClassifier,
+	buildItemState, contentText, createPresend, describeToolCall, estimateTokensOfText, estimateUsd,
+	formatUsd, Health, JevClassifier, keyFilePath, Lens, loadConfigWithVariant, MockClassifier,
 	promptsWithVariant, RECALL_DESCRIPTION, RECALL_PARAM_DESCRIPTIONS, recallMissText, resolveRates, sliceRecall, storeKey, toolCallsOf,
-	type CallStats, type Classifier, type Decision, type JevMeter, type JevTotals,
+	type CallStats, type Classifier, type Decision, type JevMeter, type JevRates, type JevTotals,
 } from "jev-lens";
 import { SecretInput } from "./src/secret-input.ts";
 import { commandCompletions, commandHelp } from "./src/commands.ts";
@@ -51,22 +51,22 @@ export default function (pi: ExtensionAPI) {
 	const viewParams = variant.views ?? {};
 	let keySource = (process.env.TYPESAFE_API_KEY || process.env.OPENROUTER_API_KEY) === cfg.apiKey && cfg.apiKey ? "env" : cfg.apiKey ? keyFilePath() : "none";
 	/**
-	 * What the jev calls themselves consumed, summed from the `usage` on every response: accounting, not an
-	 * estimate. `resolveRates()` turns it into money (TypeSafe's published $0.042 per million input tokens,
-	 * output free, unless JEV_LENS_PRICE_* overrides it); OpenRouter reports its own spend when stats ask.
+	 * What the jev calls themselves consumed and cost, summed from every response: the tokens are measured
+	 * and the money is the provider's own `usage.cost` figure, falling back to the rate table only when a
+	 * provider reports tokens without a charge. The log line keeps a session's cost auditable.
 	 */
-	let jevTotals: JevTotals = { calls: 0, input: 0, output: 0 };
+	let jevTotals: JevTotals = { calls: 0, input: 0, output: 0, usd: 0, reported: 0 };
 	/** Calls per stage, so a decision that costs two calls (choose + expand) is visible. */
 	const jevStages: Record<string, number> = {};
-	/** OpenRouter's first reading of this session, so later readings can show what changed. */
-	let openRouterBaseline: number | null = null;
 	/** One sample per jev call: totals for stats, and a log line so a session's cost stays auditable. */
 	const meter: JevMeter = (sample) => {
 		jevTotals.calls++;
 		jevTotals.input += sample.input;
 		jevTotals.output += sample.output;
+		jevTotals.usd += sample.usd;
+		if (sample.reported) jevTotals.reported++;
 		jevStages[sample.stage] = (jevStages[sample.stage] ?? 0) + 1;
-		log({ event: "jev_call", stage: sample.stage, in: sample.input, out: sample.output, model: sample.model, ms: sample.ms, calls: jevTotals.calls, input: jevTotals.input, output: jevTotals.output });
+		log({ event: "jev_call", stage: sample.stage, in: sample.input, out: sample.output, usd: Number(sample.usd.toFixed(9)), reported: sample.reported, model: sample.model, ms: sample.ms, calls: jevTotals.calls, input: jevTotals.input, output: jevTotals.output });
 	};
 	let { presend, mock: usingMock } = createPresend(cfg, prompts, meter);
 	let classifier: Classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg, meter);
@@ -138,28 +138,44 @@ export default function (pi: ExtensionAPI) {
 	};
 	/**
 	 * Totals read back from this project's log, which is appended across sessions: what jev has cost here
-	 * overall, not only since this session loaded. Undefined when the log is off, missing, or unreadable.
+	 * overall, not only since this session loaded. A line written before the cost was recorded carries no
+	 * `usd`, so those tokens are priced at the current rates instead of being dropped. Undefined when the log
+	 * is off, missing, or unreadable.
 	 */
 	const lifetimeUsage = (): (JevTotals & { sessions: number }) | undefined => {
 		if (!logPath) return undefined;
 		try {
-			const totals: JevTotals = { calls: 0, input: 0, output: 0 };
+			const rates = resolveRates();
+			const totals: JevTotals = { calls: 0, input: 0, output: 0, usd: 0, reported: 0 };
 			let sessions = 0;
 			for (const line of readFileSync(logPath, "utf8").split("\n")) {
 				if (!line.includes("\"jev_call\"") && !line.includes("\"session_start\"")) continue;
-				let record: { event?: string; in?: number; out?: number };
+				let record: { event?: string; in?: number; out?: number; usd?: number; reported?: boolean };
 				try { record = JSON.parse(line); } catch { continue; }
 				if (record.event === "session_start") sessions++;
 				else if (record.event === "jev_call") {
+					const input = Number(record.in) || 0;
+					const output = Number(record.out) || 0;
+					const usd = Number(record.usd);
 					totals.calls++;
-					totals.input += Number(record.in) || 0;
-					totals.output += Number(record.out) || 0;
+					totals.input += input;
+					totals.output += output;
+					if (Number.isFinite(usd) && usd >= 0) {
+						totals.usd += usd;
+						if (record.reported !== false) totals.reported++;
+					} else totals.usd += estimateUsd({ calls: 1, input, output }, rates);
 				}
 			}
 			return totals.calls > 0 ? { ...totals, sessions } : undefined;
 		} catch {
 			return undefined;
 		}
+	};
+	/** How the money reads: charged by the provider, estimated from the rate table, or a mix of both. */
+	const costPhrase = (totals: JevTotals, rates: JevRates) => {
+		if (totals.calls > 0 && totals.reported >= totals.calls) return `${formatUsd(totals.usd)} charged`;
+		if (totals.reported > 0) return `${formatUsd(totals.usd)} (${totals.reported}/${totals.calls} charged, the rest at $${rates.inputPerM}/M in)`;
+		return `≈${formatUsd(totals.usd)} at $${rates.inputPerM}/M in, $${rates.outputPerM}/M out${rates.perCall ? `, ${formatUsd(rates.perCall)}/call` : ""}`;
 	};
 	/** What the extension currently is, for `/jev-lens stats`. */
 	const classifierLabel = () => {
@@ -214,9 +230,8 @@ export default function (pi: ExtensionAPI) {
 		records.length = 0;
 		recordById.clear();
 		presendTotals = { considered: 0, compressed: 0, skipped: 0, tokensSaved: 0, recalls: 0 };
-		jevTotals = { calls: 0, input: 0, output: 0 };
+		jevTotals = { calls: 0, input: 0, output: 0, usd: 0, reported: 0 };
 		for (const stage of Object.keys(jevStages)) delete jevStages[stage];
-		openRouterBaseline = null;
 		restored = { compressed: 0, tokensSaved: 0 };
 		try {
 			mkdirSync(join(ctx.cwd, CONFIG_DIR_NAME), { recursive: true });
@@ -591,19 +606,10 @@ export default function (pi: ExtensionAPI) {
 			const rates = resolveRates();
 			const stages = Object.entries(jevStages).map(([stage, n]) => `${stage} ${n}`).join(" · ");
 			const costLines = [
-				`cost: ${jevTotals.calls} jev calls${stages ? ` (${stages})` : ""} · ${jevTotals.input} in / ${jevTotals.output} out tokens ≈ ${formatUsd(estimateUsd(jevTotals, rates))} at $${rates.inputPerM}/M in, $${rates.outputPerM}/M out${rates.perCall ? `, ${formatUsd(rates.perCall)}/call` : ""}`,
+				`cost: ${jevTotals.calls} jev calls${stages ? ` (${stages})` : ""} · ${jevTotals.input} in / ${jevTotals.output} out tokens · ${costPhrase(jevTotals, rates)}`,
 			];
 			const lifetime = lifetimeUsage();
-			if (lifetime) costLines.push(`lifetime (this project's log): ${lifetime.calls} jev calls${lifetime.sessions ? ` over ${lifetime.sessions} sessions` : ""} · ${lifetime.input} in / ${lifetime.output} out tokens ≈ ${formatUsd(estimateUsd(lifetime, rates))}`);
-			if (cfg.apiKey && isOpenRouter(cfg.baseURL)) {
-				const usage = await fetchOpenRouterKeyUsage({ apiKey: cfg.apiKey, baseURL: cfg.baseURL });
-				if (!usage) costLines.push("openrouter: spend not reported (the key endpoint did not answer)");
-				else {
-					if (openRouterBaseline === null) openRouterBaseline = usage.usage;
-					const delta = usage.usage - openRouterBaseline;
-					costLines.push(`openrouter: key usage ${formatUsd(usage.usage)} (today ${formatUsd(usage.usageDaily)}, month ${formatUsd(usage.usageMonthly)})${delta > 0 ? `, +${formatUsd(delta)} since this session's first reading` : ""} — every request on this key, not only jev`);
-				}
-			}
+			if (lifetime) costLines.push(`lifetime (this project's log): ${lifetime.calls} jev calls${lifetime.sessions ? ` over ${lifetime.sessions} sessions` : ""} · ${lifetime.input} in / ${lifetime.output} out tokens · ${costPhrase(lifetime, rates)}`);
 			ctx.ui.notify(
 				[
 					`mode=${cfg.mode} enabled=${cfg.enabled} presend=${cfg.presend} classifier=${classifierLabel()} key=${keySource}`,

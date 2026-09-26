@@ -1,16 +1,18 @@
 /**
  * What the jev calls themselves cost.
  *
- * Every `systemOne` response carries the tokens it consumed, so the extension can account for its own
- * spend exactly. The rates are a separate question: jev is billed for input tokens only, and TypeSafe
- * publishes $0.042 per million input tokens for jev-latest with output free, which is the default table
- * here. `JEV_LENS_PRICE_IN_PER_M`, `JEV_LENS_PRICE_OUT_PER_M` and `JEV_LENS_PRICE_PER_CALL` override it
- * when a host knows better rates.
+ * Every `systemOne` response carries the tokens it consumed and, on every provider we have seen, the charge
+ * for that call as `usage.cost`. That figure is authoritative, so it is what the extension adds up: the
+ * tokens are measured, the money is the provider's own number.
  *
- * On the OpenRouter gateway those rates are not what the account is charged (`typesafe/jev-router` is
- * listed there as free), so OpenRouter is asked for its own numbers instead: `GET /v1/key` reports the
- * key's real spend. That figure covers every request the key has made, not only jev, so it is reported
- * as its own line rather than mixed into the estimate.
+ * The rate table below is the fallback for a provider that reports tokens but no charge. jev is billed for
+ * input tokens only, TypeSafe publishes $0.042 per million input tokens for jev-latest with output free,
+ * and `JEV_LENS_PRICE_IN_PER_M`, `JEV_LENS_PRICE_OUT_PER_M` and `JEV_LENS_PRICE_PER_CALL` override the
+ * table when a host knows better rates.
+ *
+ * A key-wide spend figure (OpenRouter's `GET /v1/key`, for instance) is deliberately unused: it covers every
+ * request the key makes, so it says nothing about jev — a key doing other work shows a number larger by
+ * orders of magnitude. Measured per call, or not at all.
  */
 
 /** Which step of the pipeline made the call. */
@@ -23,6 +25,10 @@ export interface JevUsageSample {
 	input: number;
 	/** Output tokens the provider billed (free on jev, but recorded as reported). */
 	output: number;
+	/** What this call cost, USD: the provider's own figure when it reports one, else priced at the rates. */
+	usd: number;
+	/** True when `usd` is the provider's figure rather than an estimate. */
+	reported: boolean;
 	/** The model the provider answered with (`model` is echoed on every response). */
 	model: string;
 	ms: number;
@@ -33,32 +39,43 @@ export type JevMeter = (sample: JevUsageSample) => void;
 
 /** The part of a `systemOne` response this module reads. */
 export interface JevCallResult {
-	usage?: { input_tokens?: number; output_tokens?: number };
+	usage?: { input_tokens?: number; output_tokens?: number; cost?: number };
 	model?: string;
 }
 
 /**
- * Record one measured call. A provider that omits `usage` still counts as a call, with unknown tokens at
- * zero, so a missing field cannot crash a tool result or silently drop the call from the totals.
+ * Record one measured call, priced by the provider when it says what it charged and by the rate table
+ * otherwise. A provider that omits `usage` still counts as a call, with unknown tokens at zero, so a
+ * missing field cannot crash a tool result or silently drop the call from the totals.
  */
 export function recordJevCall(meter: JevMeter | undefined, stage: JevStage, result: JevCallResult, ms: number): void {
 	if (!meter) return;
 	const input = Number(result.usage?.input_tokens ?? 0);
 	const output = Number(result.usage?.output_tokens ?? 0);
+	const inTokens = Number.isFinite(input) ? input : 0;
+	const outTokens = Number.isFinite(output) ? output : 0;
+	const charged = Number(result.usage?.cost);
+	const reported = Number.isFinite(charged) && charged >= 0;
 	meter({
 		stage,
-		input: Number.isFinite(input) ? input : 0,
-		output: Number.isFinite(output) ? output : 0,
+		input: inTokens,
+		output: outTokens,
+		usd: reported ? charged : estimateUsd({ calls: 1, input: inTokens, output: outTokens }, resolveRates()),
+		reported,
 		model: typeof result.model === "string" ? result.model : "",
 		ms,
 	});
 }
 
-/** Measured jev consumption, summed over a session or a log span. */
+/** Measured jev consumption and what it cost, summed over a session or a log span. */
 export interface JevTotals {
 	calls: number;
 	input: number;
 	output: number;
+	/** Total cost in USD: provider-reported figures, plus estimates for calls that came without one. */
+	usd: number;
+	/** How many calls contributed a provider-reported figure. */
+	reported: number;
 }
 
 /** Rates in USD per million tokens, plus an optional flat price per call. */
@@ -96,19 +113,8 @@ export function resolveRates(env: NodeJS.ProcessEnv = process.env): JevRates {
 	};
 }
 
-/** True when the configured Jev API root is the OpenRouter gateway, which reports its own spend. */
-export function isOpenRouter(baseURL: string | undefined): boolean {
-	if (typeof baseURL !== "string" || baseURL.trim() === "") return false;
-	try {
-		const host = new URL(baseURL.trim()).hostname.toLowerCase();
-		return host === "openrouter.ai" || host.endsWith(".openrouter.ai");
-	} catch {
-		return false;
-	}
-}
-
 /** What the measured tokens would cost at the given rates. */
-export function estimateUsd(totals: JevTotals, rates: JevRates): number {
+export function estimateUsd(totals: Pick<JevTotals, "calls" | "input" | "output">, rates: JevRates): number {
 	return (
 		(totals.input / 1_000_000) * rates.inputPerM +
 		(totals.output / 1_000_000) * rates.outputPerM +
@@ -125,57 +131,4 @@ export function formatUsd(usd: number): string {
 	if (usd === 0) return "$0";
 	if (usd < 0.01) return `$${usd.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`;
 	return `$${usd.toFixed(4)}`;
-}
-
-/** What OpenRouter reports for the key behind these calls. */
-export interface OpenRouterKeyUsage {
-	/** Total spend on the key, USD. */
-	usage: number;
-	usageDaily: number;
-	usageWeekly: number;
-	usageMonthly: number;
-}
-
-/**
- * OpenRouter's own accounting for the API key: real spend, not an estimate. This is the only cost
- * figure OpenRouter exposes to a normal (non-management) key — per-model and per-day breakdowns need a
- * management key, and the per-generation endpoint needs a generation id the SDK does not return.
- *
- * Fails soft: any error, timeout, or unexpected body yields undefined so stats still print.
- */
-export async function fetchOpenRouterKeyUsage(cfg: {
-	apiKey?: string;
-	baseURL?: string;
-	timeoutMs?: number;
-	signal?: AbortSignal;
-}): Promise<OpenRouterKeyUsage | undefined> {
-	const { apiKey, baseURL } = cfg;
-	if (!apiKey || !baseURL) return undefined;
-	const url = `${baseURL.trim().replace(/\/+$/, "")}/v1/key`;
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), cfg.timeoutMs ?? 3000);
-	const onAbort = () => controller.abort();
-	cfg.signal?.addEventListener("abort", onAbort, { once: true });
-	try {
-		const res = await fetch(url, {
-			headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-			signal: controller.signal,
-		});
-		if (!res.ok) return undefined;
-		const body = (await res.json()) as { data?: Record<string, unknown> };
-		const data = body?.data;
-		if (!data || typeof data.usage !== "number") return undefined;
-		const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-		return {
-			usage: data.usage,
-			usageDaily: num(data.usage_daily),
-			usageWeekly: num(data.usage_weekly),
-			usageMonthly: num(data.usage_monthly),
-		};
-	} catch {
-		return undefined;
-	} finally {
-		clearTimeout(timer);
-		cfg.signal?.removeEventListener("abort", onAbort);
-	}
 }
