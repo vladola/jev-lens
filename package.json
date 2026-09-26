@@ -24,13 +24,20 @@
     "presend-replay": "node --import tsx eval/presend-replay.ts",
     "bench": "node --import tsx eval/bench/run.ts"
   },
+  "pi": {
+    "extensions": [
+      "./packages/pi-jev-lens/index.ts"
+    ]
+  },
+  "dependencies": {
+    "@types/node": "^26.6.1",
+    "typescript": "^7.0.2"
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.3",
     "@earendil-works/pi-tui": "^0.84.3",
-    "@types/node": "^26.6.1",
     "tsx": "^4.23.13",
     "typebox": "^1.3.33",
-    "typescript": "^7.0.2",
     "vitest": "^5.0.1"
   }
 }
