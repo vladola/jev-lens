@@ -181,7 +181,7 @@ describe("asynchronous session isolation", () => {
 		await h.emit("session_start");
 		d.resolve({ choice: "outline", probabilities: { outline: 1 }, needsFull: 0, confidence: 1 });
 		expect(await work).toBeUndefined();
-		const recall = await h.tools.get("recall").execute("r", { id: "old" });
+		const recall = await h.tools.get("jev_lens_recall").execute("r", { id: "old" });
 		expect(recall.content[0].text).toContain("No stored output");
 	});
 	it("bounds shutdown and ignores responses after its deadline", async () => {
@@ -206,7 +206,7 @@ describe("bash edit-miss scoring", () => {
 			{ ...result(), toolName: "bash", content: [{ type: "text", text }] },
 			// Neither another file's read nor an unrelated recall restores a.ts.
 			assistant([call("read", { path: "b.ts" }, "read-b")]),
-			assistant([call("recall", { id: "unrelated" }, "recall-other")]),
+			assistant([call("jev_lens_recall", { id: "unrelated" }, "recall-other")]),
 			assistant([call("edit", { path: "a.ts", edits: [{ oldText: '  return "unique body content 3 that should not disappear";', newText: "fixed" }] })]),
 		];
 		const rows = await scoreMessages("test", messages as any, {

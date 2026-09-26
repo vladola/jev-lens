@@ -139,12 +139,14 @@ describe("pre-send compression and recall (mock)", () => {
 		const sent = r.content[0].text as string;
 		expect(sent.length).toBeLessThan(code.length * 0.6);
 		expect(sent).toContain("export function normalizeCategory");
-		expect(sent).toContain('recall(id: "c7")');
+		expect(sent).toContain('jev_lens_recall(id: "c7")');
 		expect(r.details.jevLens.full).toBe(code);
 		expect(["outline", "relevant"]).toContain(r.details.jevLens.view);
 
-		const recall = tools.get("recall");
+		const recall = tools.get("jev_lens_recall");
 		expect(recall).toBeDefined();
+		// Blackhole registers `recall`; jev-lens must not compete for that name.
+		expect(tools.has("recall")).toBe(false);
 		const full = await recall.execute("x", { id: "c7" });
 		expect(full.content[0].text).toBe(code);
 		const slice = await recall.execute("x", { id: "c7", lines: "1-3" });
@@ -163,7 +165,9 @@ describe("pre-send compression and recall (mock)", () => {
 		const ctx = ctxFor(mkdtempSync(join(tmpdir(), "jevext-")), entries);
 		await emit("session_start", { reason: "startup" }, ctx);
 		expect(await emit("tool_result", { toolName: "read", toolCallId: "s", input: { path: "a.js" }, content: [{ type: "text", text: "short" }], isError: false }, ctx)).toBeUndefined();
-		expect(await emit("tool_result", { toolName: "recall", toolCallId: "r", input: { id: "c7" }, content: [{ type: "text", text: "x".repeat(20000) }], isError: false }, ctx)).toBeUndefined();
+		expect(await emit("tool_result", { toolName: "jev_lens_recall", toolCallId: "r", input: { id: "c7" }, content: [{ type: "text", text: "x".repeat(20000) }], isError: false }, ctx)).toBeUndefined();
+		// Blackhole's `recall` is a drill-down too: leave it uncompressed.
+		expect(await emit("tool_result", { toolName: "recall", toolCallId: "r2", input: { query: "c7" }, content: [{ type: "text", text: "y".repeat(20000) }], isError: false }, ctx)).toBeUndefined();
 	});
 });
 
@@ -172,7 +176,7 @@ describe("TUI integration", () => {
 		const mod: any = await import("../index.ts");
 		const { pi, emit, entries, tools, commands } = fakePi();
 		mod.default(pi);
-		for (const t of ["read", "bash", "grep", "find", "ls", "recall"]) expect(tools.has(t), t).toBe(true);
+		for (const t of ["read", "bash", "grep", "find", "ls", "jev_lens_recall"]) expect(tools.has(t), t).toBe(true);
 		const ctx = ctxFor(mkdtempSync(join(tmpdir(), "jevext-")), entries);
 		await emit("session_start", { reason: "startup" }, ctx);
 		const { readFileSync } = await import("node:fs");
@@ -211,7 +215,7 @@ describe("status line", () => {
 		const { pi, emit, entries, commands } = fakePi();
 		mod.default(pi as any);
 		const full = "x".repeat(8000), sent = "y".repeat(400);
-		const savedResult = { ...toolResult("old", sent + '\n\n[jev-lens: recall(id: "old")]'), details: { jevLens: { full, view: "outline", args: { path: "old.txt" } } } };
+		const savedResult = { ...toolResult("old", sent + '\n\n[jev-lens: jev_lens_recall(id: "old")]'), details: { jevLens: { full, view: "outline", args: { path: "old.txt" } } } };
 		entries.push({ type: "message", message: savedResult });
 		const statuses: string[] = [], notes: string[] = [];
 		const ctx = { ...ctxFor(mkdtempSync(join(tmpdir(), "jevext-")), entries), hasUI: true, ui: {

@@ -27,6 +27,8 @@ export interface Config {
 	minTokens: number;
 	/** Maximum wait for in-flight classifications at context, agent end and shutdown. */
 	classifyWaitMs: number;
+	/** Maximum wait for one pre-send decision. Past it the full text goes through untouched; 0 abandons immediately. */
+	presendWaitMs: number;
 	/** Provider prompt-cache TTL; idle longer than this means the cache is cold. */
 	cacheTtlMs: number;
 	/** Lines kept at head/tail when trimming. */
@@ -60,6 +62,8 @@ export interface Config {
 	/** Command output: when no section reaches this probability the step is uninformative and full is sent (0 = headers alone are allowed). */
 	presendSectionFloor: number;
 	model: string;
+	/** Jev API root: PI_JEV_BASE_URL, else TYPESAFE_BASE_URL, else the SDK default (https://api.typesafe.ai). */
+	baseURL: string | undefined;
 	/** Optional variant file (JEV_LENS_VARIANT): { config, prompts, views } overrides, as produced by eval/bench/autoresearch.ts. */
 	variantFile: string | undefined;
 	/** Force the mock classifier even when a key is present (tests, dry runs). */
@@ -98,9 +102,13 @@ export function storeKey(key: string, defaultPath?: string): string {
 	return p;
 }
 
-/** Key resolution: environment (or the package's .env, loaded into it), then the stored key. */
+/**
+ * Key resolution: environment (or the package's .env, loaded into it), then the stored key.
+ * TYPESAFE_API_KEY wins; OPENROUTER_API_KEY is accepted so the OpenRouter gateway
+ * (PI_JEV_BASE_URL=https://openrouter.ai/api) works with the key that is already exported for it.
+ */
 export function resolveApiKey(defaultPath?: string): string | undefined {
-	return process.env.TYPESAFE_API_KEY || readStoredKey(defaultPath);
+	return process.env.TYPESAFE_API_KEY || process.env.OPENROUTER_API_KEY || readStoredKey(defaultPath);
 }
 
 /**
@@ -148,6 +156,7 @@ export function loadConfig(opts: ConfigOptions = {}): Config {
 		trimAbove: num("JEV_LENS_TRIM_ABOVE", 0.6),
 		minTokens: num("JEV_LENS_MIN_TOKENS", 150),
 		classifyWaitMs: num("JEV_LENS_CLASSIFY_WAIT_MS", 2500),
+		presendWaitMs: num("JEV_LENS_PRESEND_WAIT_MS", 5000),
 		cacheTtlMs: num("JEV_LENS_CACHE_TTL_MS", 5 * 60 * 1000),
 		trimHeadLines: num("JEV_LENS_TRIM_HEAD", 15),
 		trimTailLines: num("JEV_LENS_TRIM_TAIL", 15),
@@ -166,6 +175,7 @@ export function loadConfig(opts: ConfigOptions = {}): Config {
 		presendSectionExpandAbove: num("JEV_LENS_PRESEND_SECTION_EXPAND_ABOVE", 0.5),
 		presendSectionFloor: num("JEV_LENS_PRESEND_SECTION_FLOOR", 0.3),
 		model: process.env.JEV_LENS_MODEL || "jev-latest",
+		baseURL: process.env.PI_JEV_BASE_URL?.trim() || process.env.TYPESAFE_BASE_URL?.trim() || undefined,
 		variantFile: process.env.JEV_LENS_VARIANT || undefined,
 		forceMock: process.env.JEV_LENS_CLASSIFIER === "mock",
 		logFile: process.env.JEV_LENS_LOG !== "0",

@@ -84,11 +84,16 @@ export const TOOL_RESULT_QUESTIONS = {
 	},
 };
 
+/** One TypeSafe client for every jev call, honoring PI_JEV_BASE_URL / TYPESAFE_BASE_URL (e.g. the OpenRouter gateway). */
+export function createTypeSafeClient(cfg: Pick<Config, "apiKey" | "baseURL">): TypeSafeClient {
+	return new TypeSafeClient({ apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) });
+}
+
 export class JevClassifier implements Classifier {
 	private client: TypeSafeClient;
 	private model: string;
-	constructor(cfg: Pick<Config, "apiKey" | "model">) {
-		this.client = new TypeSafeClient({ apiKey: cfg.apiKey });
+	constructor(cfg: Pick<Config, "apiKey" | "model" | "baseURL">) {
+		this.client = createTypeSafeClient(cfg);
 		this.model = cfg.model;
 	}
 	async classifyToolResult(state: ItemState, signal?: AbortSignal): Promise<Probabilities> {

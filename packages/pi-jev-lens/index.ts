@@ -4,7 +4,7 @@
  * Pre-send: before a large tool result is stored or sent, code builds candidate views (strict
  * subsets of the output with line numbers), jev (TypeSafe System One) chooses one and, for code
  * and sectioned command output, which blocks to put back. The full text stays in the result's
- * details and the `recall` tool serves it on request.
+ * details and the `jev_lens_recall` tool serves it on request.
  *
  * Post-send (off by default, JEV_LENS_MODE=rolling|batch|budget): tool results the agent has
  * already acted on are classified once and trimmed or stubbed behind a frozen, cache-aware ledger.
@@ -33,20 +33,39 @@ interface PendingResult {
 	args: unknown;
 }
 
+/**
+ * This host's recall tool name. pi keeps only the first registration of a duplicated tool name, and
+ * blackhole (installed alongside) already registers a `recall`; jev-lens therefore namespaces its own
+ * tool so both stay callable, and the footer points the model at this one.
+ */
+const RECALL_TOOL = "jev_lens_recall";
+/** A session/memory recall is already a deliberate drill-down of stored text: never compress it again. */
+const RECALL_TOOL_NAMES = new Set([RECALL_TOOL, "recall"]);
+/** How the footer tells the model to get the rest of a compressed result. */
+const recallHint = (id: string) => `Call ${RECALL_TOOL}(id: "${id}") for the full output, or ${RECALL_TOOL}(id, lines: "a-b") / ${RECALL_TOOL}(id, pattern: "...") for a slice.`;
+
 export default function (pi: ExtensionAPI) {
 	const { cfg, variant } = loadConfigWithVariant();
 	const prompts = promptsWithVariant(variant);
 	const viewParams = variant.views ?? {};
-	let keySource = process.env.TYPESAFE_API_KEY === cfg.apiKey && cfg.apiKey ? "env" : cfg.apiKey ? keyFilePath() : "none";
+	let keySource = (process.env.TYPESAFE_API_KEY || process.env.OPENROUTER_API_KEY) === cfg.apiKey && cfg.apiKey ? "env" : cfg.apiKey ? keyFilePath() : "none";
 	let { presend, mock: usingMock } = createPresend(cfg, prompts);
 	let classifier: Classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg);
-	let lens = new Lens({ cfg, presend, viewParams });
+	let lens = new Lens({ cfg, presend, viewParams, footer: { recall: recallHint } });
+	/**
+	 * Without a key — and without JEV_LENS_CLASSIFIER=mock, which asks for the mock on purpose — the extension does
+	 * nothing at all: no view, no footer, no counters, no status text. Guessing with the mock would compress on
+	 * rules instead of judgment, so keyless means "behave as if this extension were not installed".
+	 */
+	const KEYLESS = "no API key (run /jev-lens key or set TYPESAFE_API_KEY)";
+	let standDown: string | null = !cfg.forceMock && !cfg.apiKey ? KEYLESS : null;
 	/** Switch from the mock to jev once a key is available (from `/jev-lens key`), without a restart. */
 	const useKey = (apiKey: string) => {
 		cfg.apiKey = apiKey;
+		if (standDown === KEYLESS) standDown = null;
 		({ presend, mock: usingMock } = createPresend(cfg, prompts));
 		classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg);
-		lens = new Lens({ cfg, presend, viewParams });
+		lens = new Lens({ cfg, presend, viewParams, footer: { recall: recallHint } });
 	};
 	/** Full text of compressed tool results, by toolCallId, for the recall tool (also persisted in result details). */
 	const fullOutputs = new Map<string, { text: string; toolName: string; args: unknown; view: string }>();
@@ -56,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 	const remember = (r: CompressedRecord) => { records.push(r); recordById.set(r.id, r); if (records.length > 200) { const old = records.shift(); if (old) recordById.delete(old.id); } };
 	let lastAssistantText = "";
 	let health = new Health();
-	let presendTotals = { considered: 0, compressed: 0, tokensSaved: 0, recalls: 0 };
+	let presendTotals = { considered: 0, compressed: 0, skipped: 0, tokensSaved: 0, recalls: 0 };
 	let restored = { compressed: 0, tokensSaved: 0 };
 
 	let ledger = new Map<string, Decision>();
@@ -98,8 +117,19 @@ export default function (pi: ExtensionAPI) {
 		const kept = cut.presend + cut.pruned;
 		return sent > 0 ? Math.round((100 * kept) / (sent + kept)) : undefined;
 	};
+	/** What the extension currently is, for `/jev-lens stats`. */
+	const classifierLabel = () => {
+		if (standDown) return `inactive (${standDown})`;
+		if (!usingMock) return cfg.model;
+		return cfg.forceMock ? "mock (forced by JEV_LENS_CLASSIFIER)" : "mock (no key: /jev-lens key)";
+	};
+	/** The footer tag: what the extension is doing right now, in one word. */
+	const statusTag = () => {
+		if (!cfg.enabled) return "jev-lens(disabled)";
+		return usingMock ? "jev-lens(mock)" : "jev-lens";
+	};
 	const statusText = () => {
-		const tag = !cfg.enabled ? "jev-lens(disabled)" : usingMock ? "jev-lens(mock)" : "jev-lens";
+		const tag = statusTag();
 		const pct = cutShare();
 		const label = health.failing ? `${tag}(degraded)` : tag;
 		const lead = pct === undefined ? label : `${label} −${pct}% of input`;
@@ -110,6 +140,8 @@ export default function (pi: ExtensionAPI) {
 	};
 	const status = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
+		// Inert: set no tag at all, so the footer reads exactly as it would without this extension.
+		if (standDown) { ctx.ui.setStatus("jev-lens", undefined); return; }
 		for (const warning of health.warnings()) ctx.ui.notify(warning, "warning");
 		ctx.ui.setStatus("jev-lens", statusText());
 	};
@@ -137,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 		fullOutputs.clear();
 		records.length = 0;
 		recordById.clear();
-		presendTotals = { considered: 0, compressed: 0, tokensSaved: 0, recalls: 0 };
+		presendTotals = { considered: 0, compressed: 0, skipped: 0, tokensSaved: 0, recalls: 0 };
 		restored = { compressed: 0, tokensSaved: 0 };
 		try {
 			mkdirSync(join(ctx.cwd, CONFIG_DIR_NAME), { recursive: true });
@@ -162,8 +194,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}
-		log({ event: "session_start", mode: cfg.mode, enabled: cfg.enabled, mock: usingMock, ledger: ledger.size, variant: variant.name ?? null });
-		if (ctx.hasUI && usingMock && !cfg.forceMock) ctx.ui.notify("jev-lens: no TypeSafe API key. Run /jev-lens key (or set TYPESAFE_API_KEY). Using the mock classifier until then.", "warning");
+		log({ event: "session_start", mode: cfg.mode, enabled: cfg.enabled, mock: usingMock, inactive: standDown, ledger: ledger.size, variant: variant.name ?? null });
 		status(ctx);
 	});
 
@@ -227,7 +258,7 @@ export default function (pi: ExtensionAPI) {
 
 	function launchClassification(item: PendingResult, afterText: string, afterCalls: { name: string; arguments: unknown }[], ctx?: ExtensionContext) {
 		const m = item.message;
-		if (cfg.mode === "off" || sessionAbort.signal.aborted || m.content.some((c) => c.type !== "text")) return;
+		if (cfg.mode === "off" || standDown || sessionAbort.signal.aborted || m.content.some((c) => c.type !== "text")) return;
 		const epoch = generation;
 		const signal = workSignal(ctx?.signal);
 		if (ledger.has(m.toolCallId) || inflight.has(m.toolCallId)) return;
@@ -354,16 +385,34 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (!cfg.presend || !cfg.enabled || sessionAbort.signal.aborted) return;
+		// Inert: no counters, no view, no footer — the result reaches the model exactly as the tool produced it.
+		if (standDown) return;
 		const epoch = generation;
 		const signal = workSignal(ctx.signal);
-		if (event.toolName === "recall") return;
+		if (RECALL_TOOL_NAMES.has(event.toolName)) return;
 		const text = contentText(event.content);
 		const tokens = estimateTokensOfText(text);
 		if (tokens < cfg.presendMinTokens) return;
 		if (event.content.some((c) => c.type === "image")) return;
 		presendTotals.considered++;
 		try {
-			const out = await lens.compress({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.input, text, isError: event.isError, context: { firstUser, latestUser, agentText: lastAssistantText } }, signal);
+			// This hook's return value is what pi stores and sends, so jev sits on the critical path. Give the
+			// decision a budget; past it the full text goes through and the request is abandoned, rather than
+			// making the agent wait out the SDK timeout on a slow or unreachable provider.
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const budget = new AbortController();
+			const work = lens.compress({ toolCallId: event.toolCallId, toolName: event.toolName, args: event.input, text, isError: event.isError, context: { firstUser, latestUser, agentText: lastAssistantText } }, AbortSignal.any([signal, budget.signal]));
+			const raced = await Promise.race([
+				work.then((out) => ({ out }), (err) => ({ err })),
+				new Promise<{ skip: true }>((resolve) => { timer = setTimeout(() => { budget.abort(); resolve({ skip: true }); }, Math.max(0, cfg.presendWaitMs)); }),
+			]).finally(() => clearTimeout(timer));
+			if ("skip" in raced) {
+				presendTotals.skipped++;
+				log({ event: "presend_skip", id: event.toolCallId, tool: event.toolName, tokens, reason: "wait-budget", ms: cfg.presendWaitMs });
+				return;
+			}
+			if ("err" in raced) throw raced.err;
+			const { out } = raced;
 			if (epoch !== generation || signal.aborted) return;
 			if (out.reason === "no-candidates") {
 				log({ event: "presend", id: event.toolCallId, tool: event.toolName, tokens, view: "full", reason: "no-candidates" });
@@ -391,8 +440,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "recall",
-		label: "Recall",
+		name: RECALL_TOOL,
+		label: "Jev Lens Recall",
 		description: RECALL_DESCRIPTION,
 		parameters: Type.Object({
 			id: Type.String({ description: RECALL_PARAM_DESCRIPTIONS.id }),
@@ -494,8 +543,9 @@ export default function (pi: ExtensionAPI) {
 			const hit = totals.input + totals.cacheRead > 0 ? Math.round((100 * totals.cacheRead) / (totals.input + totals.cacheRead)) : 0;
 			ctx.ui.notify(
 				[
-					`mode=${cfg.mode} enabled=${cfg.enabled} presend=${cfg.presend} classifier=${usingMock ? cfg.forceMock ? "mock (forced by JEV_LENS_CLASSIFIER)" : "mock (no key: /jev-lens key)" : cfg.model} key=${keySource}`,
-					`presend since load: ${presendTotals.compressed}/${presendTotals.considered} large results compressed, ≈${presendTotals.tokensSaved} tokens saved, ${presendTotals.recalls} recalls`,
+					`mode=${cfg.mode} enabled=${cfg.enabled} presend=${cfg.presend} classifier=${classifierLabel()} key=${keySource}`,
+					...(standDown ? [`inactive: ${standDown}. Results pass through untouched — no view, no footer, no counters. /jev-lens key turns it on without a restart.`] : []),
+					`presend since load: ${presendTotals.compressed}/${presendTotals.considered} large results compressed, ≈${presendTotals.tokensSaved} tokens saved, ${presendTotals.recalls} recalls${presendTotals.skipped ? `, ${presendTotals.skipped} passed through past the ${cfg.presendWaitMs}ms wait budget` : ""}`,
 					`restored from session: ${restored.compressed} compressed results, ≈${restored.tokensSaved} tokens saved (included in footer savings)`,
 					`post-send: calls=${totals.calls} decisions=${ledger.size} applied=${totals.applied} pruned≈${totals.pruned} tokens`,
 					...health.lines(),

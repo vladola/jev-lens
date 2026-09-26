@@ -5,15 +5,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { keyFilePath, readStoredKey, resolveApiKey, storeKey } from "../src/config.ts";
 
 describe("TypeSafe API key resolution", () => {
-	const saved = { file: process.env.JEV_LENS_KEY_FILE, key: process.env.TYPESAFE_API_KEY };
+	const saved = { file: process.env.JEV_LENS_KEY_FILE, key: process.env.TYPESAFE_API_KEY, openrouter: process.env.OPENROUTER_API_KEY };
 	afterEach(() => {
 		if (saved.file === undefined) delete process.env.JEV_LENS_KEY_FILE; else process.env.JEV_LENS_KEY_FILE = saved.file;
 		if (saved.key === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = saved.key;
+		if (saved.openrouter === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = saved.openrouter;
 	});
 	it("stores the key user-only and reads it back; the environment wins when set", () => {
 		const dir = mkdtempSync(join(tmpdir(), "jevkey-"));
 		process.env.JEV_LENS_KEY_FILE = join(dir, "sub", "jev-lens.json");
 		delete process.env.TYPESAFE_API_KEY;
+		delete process.env.OPENROUTER_API_KEY;
 		expect(readStoredKey()).toBeUndefined();
 		expect(resolveApiKey()).toBeUndefined();
 		const where = storeKey("  ts_abc  ");
@@ -22,6 +24,16 @@ describe("TypeSafe API key resolution", () => {
 		if (process.platform !== "win32") expect(statSync(where).mode & 0o777).toBe(0o600);
 		expect(readStoredKey()).toBe("ts_abc");
 		expect(resolveApiKey()).toBe("ts_abc");
+		process.env.TYPESAFE_API_KEY = "ts_env";
+		expect(resolveApiKey()).toBe("ts_env");
+	});
+	it("falls back to OPENROUTER_API_KEY, which TYPESAFE_API_KEY and the environment outrank", () => {
+		const dir = mkdtempSync(join(tmpdir(), "jevkey-"));
+		process.env.JEV_LENS_KEY_FILE = join(dir, "jev-lens.json");
+		storeKey("ts_stored");
+		delete process.env.TYPESAFE_API_KEY;
+		process.env.OPENROUTER_API_KEY = "sk-or-env";
+		expect(resolveApiKey()).toBe("sk-or-env");
 		process.env.TYPESAFE_API_KEY = "ts_env";
 		expect(resolveApiKey()).toBe("ts_env");
 	});

@@ -3,7 +3,7 @@
  * build candidate views, let jev pick one, expand the blocks or sections it will need, and return the
  * view to send. Hosts (pi, Claude Code) wrap this with their own storage, recall tool and UI.
  */
-import { TypeSafeClient } from "@typesafe-ai/sdk";
+import { createTypeSafeClient } from "./classifier.ts";
 import type { Config, VariantOverrides } from "./config.ts";
 import { buildPresendState, decideView, DEFAULT_PROMPTS, expandRelevantBlocks, JevPresend, MockPresend, type PresendClassifier, type PromptVariant } from "./presend.ts";
 import { estimateTokensOfText } from "./text.ts";
@@ -102,7 +102,7 @@ export class Lens {
 /** jev when a key is available (or the mock when forced or keyless), so every host makes the same choice. */
 export function createPresend(cfg: Config, prompts: PromptVariant = DEFAULT_PROMPTS): { presend: PresendClassifier; mock: boolean } {
 	const mock = cfg.forceMock || !cfg.apiKey;
-	return { presend: mock ? new MockPresend() : new JevPresend(new TypeSafeClient({ apiKey: cfg.apiKey }), cfg.model, prompts), mock };
+	return { presend: mock ? new MockPresend() : new JevPresend(createTypeSafeClient(cfg), cfg.model, prompts), mock };
 }
 
 /** The default prompts with a variant file's overrides applied (autoresearch output). */

@@ -1,7 +1,8 @@
 # jev-lens
 
 Your coding agent reads a 600-line file to change one function. jev-lens sends the model the outline of the file and
-that one function. The agent can ask for the rest with a `recall` tool, and the footer of the result tells it so.
+that one function. The agent can ask for the rest with a `recall` tool (named `jev_lens_recall` in pi, where blackhole
+already registers a `recall`), and the footer of the result tells it so.
 
 Tool output is most of what a coding agent pays for. Every `cat`, every test run and every `grep` goes into the
 prompt in full and stays there for the rest of the session. jev-lens acts before that first send. Code builds a
@@ -15,7 +16,7 @@ This repository holds three packages that share one core:
 | package | what it is | install |
 |---|---|---|
 | [`jev-lens`](packages/core) | the host-independent core: candidate views, tree-sitter outlines, the jev questions and decision rule, the recall slicing | `npm install jev-lens` |
-| [`pi-jev-lens`](packages/pi-jev-lens) | the extension for [pi](https://github.com/earendil-works/pi-mono): pre-send compression, the `recall` tool, a comparison view in the TUI, optional post-send pruning | `pi install npm:pi-jev-lens` |
+| [`pi-jev-lens`](packages/pi-jev-lens) | the extension for [pi](https://github.com/earendil-works/pi-mono): pre-send compression, the `jev_lens_recall` tool, a comparison view in the TUI, optional post-send pruning | `pi install npm:pi-jev-lens` |
 | [`jev-lens` plugin for Claude Code](packages/claude-code) | a PostToolUse hook that replaces large Read, Bash and Grep results before Claude sees them, plus an MCP server with `recall` and `stats` | `/plugin marketplace add dizk/jev-lens` then `/plugin install jev-lens@jev-lens` |
 
 ## What the numbers say
@@ -69,8 +70,9 @@ STATUS.md             the research log: every variant tried, its numbers, and wh
 ```sh
 git clone https://github.com/dizk/jev-lens.git && cd jev-lens
 npm install                      # links the workspaces and builds packages/core/dist
-echo 'TYPESAFE_API_KEY=...' > .env
-npm test                         # all packages, mock classifier where no key is needed
+# TYPESAFE_API_KEY=...          # a TypeSafe key, or an OpenRouter key when PI_JEV_BASE_URL points at OpenRouter
+# PI_JEV_BASE_URL=https://openrouter.ai/api   # optional: any Jev-compatible endpoint; JEV_LENS_MODEL defaults to jev-latest
+npm test                         # all packages; the mock classifier stands in for jev where one is needed
 npm run typecheck
 pi -e ./packages/pi-jev-lens/index.ts                    # try the pi extension
 claude --plugin-dir ./packages/claude-code      # try the Claude Code plugin

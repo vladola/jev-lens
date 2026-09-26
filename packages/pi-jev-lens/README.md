@@ -4,7 +4,12 @@ The pi extension of [jev-lens](https://github.com/dizk/jev-lens). The core that 
 `jev-lens` package in the same repository; a Claude Code plugin uses the same core.
 
 Your coding agent reads a 600-line file to change one function. jev-lens sends the model the outline of the file and
-that one function. The agent can ask for the rest with the `recall` tool, and the footer of the result tells it so.
+that one function. The agent can ask for the rest with its `jev_lens_recall` tool, and the footer of the result tells
+it so.
+
+In pi this tool is named `jev_lens_recall` rather than `recall`: pi keeps only the first registration of a duplicated
+tool name, and blackhole registers a `recall` of its own, so jev-lens namespaces its tool instead of competing for
+the name. The footer names the tool it wants called, so the model does not have to guess which one to use.
 
 jev-lens is an extension for [pi](https://github.com/earendil-works/pi-mono), the coding agent. Tool output is most
 of what a coding agent pays for. Every `cat`, every test run and every `grep` goes into the prompt in full and stays
@@ -27,8 +32,8 @@ This is what the model sees instead of a file of 1.5k tokens:
  81│ export function categoryReport(entries) {
      ⋯ 20 lines omitted
 
-[jev-lens: showing the "relevant" view, 9 of 102 lines. Omitted lines are marked ⋯. Call recall(id: "…") for the
-full output, or recall(id, lines: "a-b") / recall(id, pattern: "...") for a slice.]
+[jev-lens: showing the "relevant" view, 9 of 102 lines. Omitted lines are marked ⋯. Call jev_lens_recall(id: "…") for
+the full output, or jev_lens_recall(id, lines: "a-b") / jev_lens_recall(id, pattern: "...") for a slice.]
 ```
 
 ## What the numbers say
@@ -76,7 +81,7 @@ pi install npm:pi-jev-lens
 jev needs a TypeSafe API key. You can get one at [console.typesafe.ai](https://console.typesafe.ai). jev-lens looks
 for the key in this order:
 
-1. `TYPESAFE_API_KEY` in the environment.
+1. `TYPESAFE_API_KEY` in the environment, else `OPENROUTER_API_KEY` (so an already-exported OpenRouter key works).
 2. A `.env` file next to the installed package. This is for development and supplies environment values that are not already set.
 3. The key that you stored with `/jev-lens key` inside pi. In terminal mode, the command opens a masked input field.
    The key is stored in `~/.pi/agent/jev-lens.json`. New files are readable only by you.
@@ -91,8 +96,14 @@ A new key takes effect without a restart, but the command does not validate it.
 If `TYPESAFE_API_KEY` is set, that value takes priority again after reload.
 If mock mode is forced or compression is disabled, storing a key does not change those settings.
 
-If no key is found, the extension shows a warning at startup and uses a deterministic mock classifier.
-The mock can compress results without API calls. It is not the jev model.
+With no key, the extension does nothing at all: no view, no footer, no counters, no status text, no warning. Large
+results reach the model exactly as the tool produced them, and `/jev-lens stats` names the reason it is inactive.
+The mock classifier is a tool for tests and dry runs, not a stand-in to compress with, so it runs only when asked for
+with `JEV_LENS_CLASSIFIER=mock`. Storing a key with `/jev-lens key` turns the extension on without a restart.
+
+The Jev API root defaults to TypeSafe's own API. `PI_JEV_BASE_URL` (or `TYPESAFE_BASE_URL`) points it elsewhere: the
+[OpenRouter gateway](https://openrouter.ai) serves jev at `https://openrouter.ai/api` and takes an OpenRouter key
+there. `JEV_LENS_MODEL` picks the model and defaults to `jev-latest`.
 
 For development, clone the repository and load it directly:
 
@@ -183,8 +194,13 @@ Use `/reload` after installing the package in a running pi session.
 - `/jev-lens key` stores the API key.
 
 If compression fails, jev-lens keeps the full output and shows a warning. A failed post-send classification leaves that result unchanged.
+It retries on the next result, so a provider that recovers is used again without a restart. Failures are not cached.
 Warnings appear at most once per stage per session. The footer shows `degraded` until a later attempt in that stage succeeds.
 Use `/jev-lens stats` to see failure counts and recovery status. Cancellation does not count as a failure.
+
+A jev call cannot make the agent wait indefinitely: the pre-send decision has a budget (`JEV_LENS_PRESEND_WAIT_MS`,
+default `5000`). Past it the full text goes through, the request is dropped, and `/jev-lens stats` counts the result as
+passed through rather than failed. Waiting too long is not an error, only a reason to skip the saving.
 
 Uncompressed results, errors, and streaming updates use pi's built-in tool renderers.
 jev-lens logs every decision to `<project>/.pi/jev-lens.log` as JSON lines. Set `JEV_LENS_UI=0` to disable the
@@ -205,6 +221,7 @@ custom savings headers and tool overrides.
 | `JEV_LENS_PRESEND_SECTION_EXPAND_ABOVE` | `0.5` | expand a section when P(needed) is above this |
 | `JEV_LENS_PRESEND_SECTION_FLOOR` | `0.3` | send full when no section reaches this probability, because jev could not tell. `0` allows headers alone |
 | `JEV_LENS_PRESEND_MIN_CONFIDENCE` | `0` | send full below this choice confidence. `0` turns the check off |
+| `JEV_LENS_PRESEND_WAIT_MS` | `5000` | abandon the pre-send decision past this and send the full text. `0` never waits |
 | `JEV_LENS_MODEL` | `jev-latest` | the jev model |
 | `JEV_LENS_CLASSIFIER` | unset | `mock` forces the deterministic classifier, with no API calls |
 | `JEV_LENS_LOG` | `1` | `0` turns logging off |
