@@ -70,6 +70,34 @@ Three results shaped the design:
    thresholds. None of its changes held up on data that it had not seen. Every gain that held was a new kind of view:
    only the failing tests, grep match groups, JSON keys, the file that the agent read with `cat`.
 
+## What jev costs
+
+Every jev response reports the tokens it consumed, so the extension counts its own spend instead of estimating it.
+jev is billed for input only: TypeSafe publishes $0.042 per million input tokens for jev-latest and does not charge
+for output. A decision that needs both steps (`choose`, then `expand`) sends roughly 5.5k input tokens, about
+$0.0002 — a fraction of what it keeps out of the prompt, and it is paid once while the saving is paid on every
+later call that would have carried those tokens.
+
+`/jev-lens stats` prints it, for this session and for the project:
+
+```text
+cost: 4 jev calls (choose 3, expand 1) · 11,802 in / 332 out tokens ≈ $0.000496 at $0.042/M in, $0/M out
+lifetime (this project's log): 143 jev calls over 26 sessions · 441,905 in / 9,410 out tokens ≈ $0.0186
+openrouter: key usage $114.9130 (today $0.0582, month $3.6249) — every request on this key, not only jev
+```
+
+- The first line is this session, summed from the `usage` on each response.
+- The second is every session this project has logged: each call is appended to `.pi/jev-lens.log` as a `jev_call`
+  event, so the total survives restarts.
+- The third appears only on the OpenRouter gateway, and it is OpenRouter's own figure rather than arithmetic: the
+  key endpoint reports what the account has spent. It covers every request that key makes, and
+  `typesafe/jev-router` is listed as free there, so treat it as context rather than as jev's bill. Per-model and
+  per-generation breakdowns need a management key, and the SDK does not return a generation id.
+
+If you are billed differently — a negotiated rate, or a provider that charges for output — set
+`JEV_LENS_PRICE_IN_PER_M`, `JEV_LENS_PRICE_OUT_PER_M` and `JEV_LENS_PRICE_PER_CALL`. A value that is not a number is
+ignored rather than priced at zero, so a typo cannot make the estimate read as free.
+
 ## Install
 
 Use pi 0.84.3 or newer. The extension uses pi's built-in tool renderers for results that it does not compress.
@@ -223,6 +251,7 @@ custom savings headers and tool overrides.
 | `JEV_LENS_PRESEND_MIN_CONFIDENCE` | `0` | send full below this choice confidence. `0` turns the check off |
 | `JEV_LENS_PRESEND_WAIT_MS` | `5000` | abandon the pre-send decision past this and send the full text. `0` never waits |
 | `JEV_LENS_MODEL` | `jev-latest` | the jev model |
+| `JEV_LENS_PRICE_IN_PER_M` / `_OUT_PER_M` / `_PER_CALL` | `0.042` / `0` / `0` | USD rates used to price jev's own calls in `/jev-lens stats`, overriding the published table |
 | `JEV_LENS_CLASSIFIER` | unset | `mock` forces the deterministic classifier, with no API calls |
 | `JEV_LENS_LOG` | `1` | `0` turns logging off |
 | `JEV_LENS_UI` | `1` | `0` turns the custom tool rendering off |

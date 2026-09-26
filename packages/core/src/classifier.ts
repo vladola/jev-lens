@@ -2,6 +2,7 @@ import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Config } from "./config.ts";
 import type { Probabilities } from "./types.ts";
 import { head, tail, truncate } from "./text.ts";
+import { recordJevCall, type JevMeter } from "./cost.ts";
 
 /** Everything jev sees about one tool result. Built identically by the extension and the replay harness. */
 export interface ItemState {
@@ -92,12 +93,14 @@ export function createTypeSafeClient(cfg: Pick<Config, "apiKey" | "baseURL">): T
 export class JevClassifier implements Classifier {
 	private client: TypeSafeClient;
 	private model: string;
-	constructor(cfg: Pick<Config, "apiKey" | "model" | "baseURL">) {
+	constructor(cfg: Pick<Config, "apiKey" | "model" | "baseURL">, private meter?: JevMeter) {
 		this.client = createTypeSafeClient(cfg);
 		this.model = cfg.model;
 	}
 	async classifyToolResult(state: ItemState, signal?: AbortSignal): Promise<Probabilities> {
+		const started = Date.now();
 		const r = await this.client.systemOne({ state: state as never, questions: TOOL_RESULT_QUESTIONS, model: this.model }, { signal, timeout: 15000 });
+		recordJevCall(this.meter, "classify", r, Date.now() - started);
 		return { needed: r.answers.needed.noul, outcomeOnly: r.answers.outcome_only.noul };
 	}
 }

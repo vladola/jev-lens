@@ -5,6 +5,7 @@
  */
 import { createTypeSafeClient } from "./classifier.ts";
 import type { Config, VariantOverrides } from "./config.ts";
+import type { JevMeter } from "./cost.ts";
 import { buildPresendState, decideView, DEFAULT_PROMPTS, expandRelevantBlocks, JevPresend, MockPresend, type PresendClassifier, type PromptVariant } from "./presend.ts";
 import { estimateTokensOfText } from "./text.ts";
 import { buildCandidatesAsync, extractTerms, footer, type ContentKind, type FooterOptions, type View, type ViewParams } from "./views.ts";
@@ -100,9 +101,9 @@ export class Lens {
 }
 
 /** jev when a key is available (or the mock when forced or keyless), so every host makes the same choice. */
-export function createPresend(cfg: Config, prompts: PromptVariant = DEFAULT_PROMPTS): { presend: PresendClassifier; mock: boolean } {
+export function createPresend(cfg: Config, prompts: PromptVariant = DEFAULT_PROMPTS, meter?: JevMeter): { presend: PresendClassifier; mock: boolean } {
 	const mock = cfg.forceMock || !cfg.apiKey;
-	return { presend: mock ? new MockPresend() : new JevPresend(createTypeSafeClient(cfg), cfg.model, prompts), mock };
+	return { presend: mock ? new MockPresend() : new JevPresend(createTypeSafeClient(cfg), cfg.model, prompts, meter), mock };
 }
 
 /** The default prompts with a variant file's overrides applied (autoresearch output). */

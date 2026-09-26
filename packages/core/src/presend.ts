@@ -1,6 +1,7 @@
 import type { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { Config } from "./config.ts";
 import { truncate } from "./text.ts";
+import { recordJevCall, type JevMeter } from "./cost.ts";
 import { relevantView, splitBlocks, splitSections, type Block, type Candidates, type View, type ViewKind } from "./views.ts";
 
 export interface PresendState {
@@ -122,13 +123,17 @@ export function presendQuestions(kinds: ViewKind[], prompts: PromptVariant = DEF
 }
 
 export class JevPresend implements PresendClassifier {
-	constructor(private client: TypeSafeClient, private model: string, private prompts: PromptVariant = DEFAULT_PROMPTS) {}
+	constructor(private client: TypeSafeClient, private model: string, private prompts: PromptVariant = DEFAULT_PROMPTS, private meter?: JevMeter) {}
 	async expand(state: ExpandState, signal?: AbortSignal): Promise<number[]> {
+		const started = Date.now();
 		const r = await this.client.systemOne({ state: state as never, questions: expandQuestions(state.blocks.length, this.prompts, state.file.kind), model: this.model }, { signal, timeout: 15000 });
+		recordJevCall(this.meter, "expand", r, Date.now() - started);
 		return state.blocks.map((_, i) => (r.answers[`b${i}`] as { noul: number }).noul);
 	}
 	async choose(state: PresendState, kinds: ViewKind[], signal?: AbortSignal) {
+		const started = Date.now();
 		const r = await this.client.systemOne({ state: state as never, questions: presendQuestions(kinds, this.prompts), model: this.model }, { signal, timeout: 15000 });
+		recordJevCall(this.meter, "choose", r, Date.now() - started);
 		return { choice: r.answers.view.choice as ViewKind, probabilities: r.answers.view.probabilities as Record<string, number>, confidence: r.answers.view.confidence, needsFull: r.answers.needs_full.noul };
 	}
 }

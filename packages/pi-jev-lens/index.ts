@@ -9,7 +9,7 @@
  * Post-send (off by default, JEV_LENS_MODE=rolling|batch|budget): tool results the agent has
  * already acted on are classified once and trimmed or stubbed behind a frozen, cache-aware ledger.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "./src/pi-types.ts";
@@ -19,9 +19,10 @@ import { createBashToolDefinition, createFindToolDefinition, createGrepToolDefin
 import { Text } from "@earendil-works/pi-tui";
 import { ComparisonResult, comparisonHint, listLines, savingsLine, type CompressedRecord } from "./src/ui.ts";
 import {
-	buildItemState, contentText, createPresend, describeToolCall, estimateTokensOfText, Health, JevClassifier, keyFilePath,
-	Lens, loadConfigWithVariant, MockClassifier, promptsWithVariant, RECALL_DESCRIPTION, RECALL_PARAM_DESCRIPTIONS, recallMissText, sliceRecall, storeKey, toolCallsOf,
-	type CallStats, type Classifier, type Decision,
+	buildItemState, contentText, createPresend, describeToolCall, estimateTokensOfText, estimateUsd, fetchOpenRouterKeyUsage,
+	formatUsd, Health, isOpenRouter, JevClassifier, keyFilePath, Lens, loadConfigWithVariant, MockClassifier,
+	promptsWithVariant, RECALL_DESCRIPTION, RECALL_PARAM_DESCRIPTIONS, recallMissText, resolveRates, sliceRecall, storeKey, toolCallsOf,
+	type CallStats, type Classifier, type Decision, type JevMeter, type JevTotals,
 } from "jev-lens";
 import { SecretInput } from "./src/secret-input.ts";
 import { commandCompletions, commandHelp } from "./src/commands.ts";
@@ -49,8 +50,26 @@ export default function (pi: ExtensionAPI) {
 	const prompts = promptsWithVariant(variant);
 	const viewParams = variant.views ?? {};
 	let keySource = (process.env.TYPESAFE_API_KEY || process.env.OPENROUTER_API_KEY) === cfg.apiKey && cfg.apiKey ? "env" : cfg.apiKey ? keyFilePath() : "none";
-	let { presend, mock: usingMock } = createPresend(cfg, prompts);
-	let classifier: Classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg);
+	/**
+	 * What the jev calls themselves consumed, summed from the `usage` on every response: accounting, not an
+	 * estimate. `resolveRates()` turns it into money (TypeSafe's published $0.042 per million input tokens,
+	 * output free, unless JEV_LENS_PRICE_* overrides it); OpenRouter reports its own spend when stats ask.
+	 */
+	let jevTotals: JevTotals = { calls: 0, input: 0, output: 0 };
+	/** Calls per stage, so a decision that costs two calls (choose + expand) is visible. */
+	const jevStages: Record<string, number> = {};
+	/** OpenRouter's first reading of this session, so later readings can show what changed. */
+	let openRouterBaseline: number | null = null;
+	/** One sample per jev call: totals for stats, and a log line so a session's cost stays auditable. */
+	const meter: JevMeter = (sample) => {
+		jevTotals.calls++;
+		jevTotals.input += sample.input;
+		jevTotals.output += sample.output;
+		jevStages[sample.stage] = (jevStages[sample.stage] ?? 0) + 1;
+		log({ event: "jev_call", stage: sample.stage, in: sample.input, out: sample.output, model: sample.model, ms: sample.ms, calls: jevTotals.calls, input: jevTotals.input, output: jevTotals.output });
+	};
+	let { presend, mock: usingMock } = createPresend(cfg, prompts, meter);
+	let classifier: Classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg, meter);
 	let lens = new Lens({ cfg, presend, viewParams, footer: { recall: recallHint } });
 	/**
 	 * Without a key — and without JEV_LENS_CLASSIFIER=mock, which asks for the mock on purpose — the extension does
@@ -63,8 +82,8 @@ export default function (pi: ExtensionAPI) {
 	const useKey = (apiKey: string) => {
 		cfg.apiKey = apiKey;
 		if (standDown === KEYLESS) standDown = null;
-		({ presend, mock: usingMock } = createPresend(cfg, prompts));
-		classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg);
+		({ presend, mock: usingMock } = createPresend(cfg, prompts, meter));
+		classifier = usingMock ? new MockClassifier() : new JevClassifier(cfg, meter);
 		lens = new Lens({ cfg, presend, viewParams, footer: { recall: recallHint } });
 	};
 	/** Full text of compressed tool results, by toolCallId, for the recall tool (also persisted in result details). */
@@ -116,6 +135,31 @@ export default function (pi: ExtensionAPI) {
 		const sent = totals.input + totals.cacheRead;
 		const kept = cut.presend + cut.pruned;
 		return sent > 0 ? Math.round((100 * kept) / (sent + kept)) : undefined;
+	};
+	/**
+	 * Totals read back from this project's log, which is appended across sessions: what jev has cost here
+	 * overall, not only since this session loaded. Undefined when the log is off, missing, or unreadable.
+	 */
+	const lifetimeUsage = (): (JevTotals & { sessions: number }) | undefined => {
+		if (!logPath) return undefined;
+		try {
+			const totals: JevTotals = { calls: 0, input: 0, output: 0 };
+			let sessions = 0;
+			for (const line of readFileSync(logPath, "utf8").split("\n")) {
+				if (!line.includes("\"jev_call\"") && !line.includes("\"session_start\"")) continue;
+				let record: { event?: string; in?: number; out?: number };
+				try { record = JSON.parse(line); } catch { continue; }
+				if (record.event === "session_start") sessions++;
+				else if (record.event === "jev_call") {
+					totals.calls++;
+					totals.input += Number(record.in) || 0;
+					totals.output += Number(record.out) || 0;
+				}
+			}
+			return totals.calls > 0 ? { ...totals, sessions } : undefined;
+		} catch {
+			return undefined;
+		}
 	};
 	/** What the extension currently is, for `/jev-lens stats`. */
 	const classifierLabel = () => {
@@ -170,6 +214,9 @@ export default function (pi: ExtensionAPI) {
 		records.length = 0;
 		recordById.clear();
 		presendTotals = { considered: 0, compressed: 0, skipped: 0, tokensSaved: 0, recalls: 0 };
+		jevTotals = { calls: 0, input: 0, output: 0 };
+		for (const stage of Object.keys(jevStages)) delete jevStages[stage];
+		openRouterBaseline = null;
 		restored = { compressed: 0, tokensSaved: 0 };
 		try {
 			mkdirSync(join(ctx.cwd, CONFIG_DIR_NAME), { recursive: true });
@@ -541,12 +588,29 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const hit = totals.input + totals.cacheRead > 0 ? Math.round((100 * totals.cacheRead) / (totals.input + totals.cacheRead)) : 0;
+			const rates = resolveRates();
+			const stages = Object.entries(jevStages).map(([stage, n]) => `${stage} ${n}`).join(" · ");
+			const costLines = [
+				`cost: ${jevTotals.calls} jev calls${stages ? ` (${stages})` : ""} · ${jevTotals.input} in / ${jevTotals.output} out tokens ≈ ${formatUsd(estimateUsd(jevTotals, rates))} at $${rates.inputPerM}/M in, $${rates.outputPerM}/M out${rates.perCall ? `, ${formatUsd(rates.perCall)}/call` : ""}`,
+			];
+			const lifetime = lifetimeUsage();
+			if (lifetime) costLines.push(`lifetime (this project's log): ${lifetime.calls} jev calls${lifetime.sessions ? ` over ${lifetime.sessions} sessions` : ""} · ${lifetime.input} in / ${lifetime.output} out tokens ≈ ${formatUsd(estimateUsd(lifetime, rates))}`);
+			if (cfg.apiKey && isOpenRouter(cfg.baseURL)) {
+				const usage = await fetchOpenRouterKeyUsage({ apiKey: cfg.apiKey, baseURL: cfg.baseURL });
+				if (!usage) costLines.push("openrouter: spend not reported (the key endpoint did not answer)");
+				else {
+					if (openRouterBaseline === null) openRouterBaseline = usage.usage;
+					const delta = usage.usage - openRouterBaseline;
+					costLines.push(`openrouter: key usage ${formatUsd(usage.usage)} (today ${formatUsd(usage.usageDaily)}, month ${formatUsd(usage.usageMonthly)})${delta > 0 ? `, +${formatUsd(delta)} since this session's first reading` : ""} — every request on this key, not only jev`);
+				}
+			}
 			ctx.ui.notify(
 				[
 					`mode=${cfg.mode} enabled=${cfg.enabled} presend=${cfg.presend} classifier=${classifierLabel()} key=${keySource}`,
 					...(standDown ? [`inactive: ${standDown}. Results pass through untouched — no view, no footer, no counters. /jev-lens key turns it on without a restart.`] : []),
 					`presend since load: ${presendTotals.compressed}/${presendTotals.considered} large results compressed, ≈${presendTotals.tokensSaved} tokens saved, ${presendTotals.recalls} recalls${presendTotals.skipped ? `, ${presendTotals.skipped} passed through past the ${cfg.presendWaitMs}ms wait budget` : ""}`,
 					`restored from session: ${restored.compressed} compressed results, ≈${restored.tokensSaved} tokens saved (included in footer savings)`,
+					...costLines,
 					`post-send: calls=${totals.calls} decisions=${ledger.size} applied=${totals.applied} pruned≈${totals.pruned} tokens`,
 					...health.lines(),
 					`cache: read=${totals.cacheRead} uncached=${totals.input} hit=${hit}%`,

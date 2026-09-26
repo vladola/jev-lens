@@ -5,6 +5,7 @@ export * from "./health.ts";
 export * from "./views.ts";
 export * from "./presend.ts";
 export * from "./classifier.ts";
+export * from "./cost.ts";
 export * from "./lens.ts";
 export * from "./recall.ts";
 export { languageForPath, treeSitterBlocks, treeSitterOutline } from "./treesitter.ts";
