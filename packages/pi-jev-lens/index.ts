@@ -19,7 +19,7 @@ import { createBashToolDefinition, createFindToolDefinition, createGrepToolDefin
 import { Text } from "@earendil-works/pi-tui";
 import { ComparisonResult, comparisonHint, listLines, savingsLine, type CompressedRecord } from "./src/ui.ts";
 import {
-	buildItemState, contentText, createPresend, describeToolCall, estimateTokensOfText, estimateUsd,
+	buildItemState, contentText, createPresend, describeError, describeToolCall, estimateTokensOfText, estimateUsd,
 	formatUsd, Health, JevClassifier, keyFilePath, Lens, loadConfigWithVariant, MockClassifier,
 	promptsWithVariant, RECALL_DESCRIPTION, RECALL_PARAM_DESCRIPTIONS, recallMissText, resolveRates, sliceRecall, storeKey, toolCallsOf,
 	type CallStats, type Classifier, type Decision, type JevMeter, type JevRates, type JevTotals,
@@ -363,7 +363,7 @@ export default function (pi: ExtensionAPI) {
 			.catch((err) => {
 				if (epoch !== generation || signal.aborted) return;
 				health.failure("postsend", err);
-				log({ event: "classify_error", id: m.toolCallId, error: health.lines()[1] });
+				log({ event: "classify_error", id: m.toolCallId, tool: m.toolName, ms: Date.now() - started, error: health.lines()[1], detail: describeError(err) });
 				if (ctx) status(ctx);
 			})
 			.finally(() => { if (epoch === generation) inflight.delete(m.toolCallId); });
@@ -457,6 +457,7 @@ export default function (pi: ExtensionAPI) {
 		if (tokens < cfg.presendMinTokens) return;
 		if (event.content.some((c) => c.type === "image")) return;
 		presendTotals.considered++;
+		const startedAt = Date.now();
 		try {
 			// This hook's return value is what pi stores and sends, so jev sits on the critical path. Give the
 			// decision a budget; past it the full text goes through and the request is abandoned, rather than
@@ -495,7 +496,7 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			if (epoch !== generation || signal.aborted) return;
 			health.failure("presend", err);
-			log({ event: "presend_error", id: event.toolCallId, error: health.lines()[0] });
+			log({ event: "presend_error", id: event.toolCallId, tool: event.toolName, tokens, ms: Date.now() - startedAt, error: health.lines()[0], detail: describeError(err) });
 			status(ctx);
 			return;
 		}

@@ -114,4 +114,19 @@ describe("wait budget", () => {
 		expect(choose).toHaveBeenCalledTimes(2); // retried rather than standing down
 		expect(await stats(h, ctx)).toContain("presend failures: 1 (a later attempt succeeded)");
 	});
+	it("records what actually failed, because the warning is not allowed to say", async () => {
+		vi.stubEnv("JEV_LENS_CLASSIFIER", "mock");
+		vi.stubEnv("JEV_LENS_LOG", ""); // the log is where the raw error is kept
+		const h = harness(), ctx = ui(h);
+		const cause = Object.assign(new Error("getaddrinfo ENOTFOUND openrouter.ai"), { code: "ENOTFOUND" });
+		vi.spyOn(MockPresend.prototype, "choose").mockRejectedValue(Object.assign(new TypeError("fetch failed"), { cause }));
+		await h.emit("session_start", {}, ctx);
+		expect(await h.emit("tool_result", event, ctx)).toBeUndefined();
+		const entries = readFileSync(join(h.ctx.cwd, ".pi", "jev-lens.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		const failure = entries.find((e) => e.event === "presend_error");
+		expect(failure).toMatchObject({ tool: "read", detail: { name: "TypeError", message: "fetch failed", cause: { name: "Error", message: "getaddrinfo ENOTFOUND openrouter.ai", code: "ENOTFOUND" } } });
+		expect(typeof failure.ms).toBe("number");
+		// And the user hears the cause rather than "report this as a bug".
+		expect(ctx.ui.notify.mock.calls[0][0]).toContain("Connection failed (TypeError → ENOTFOUND)");
+	});
 });

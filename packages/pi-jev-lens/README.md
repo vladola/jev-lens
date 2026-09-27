@@ -228,6 +228,12 @@ If compression fails, jev-lens keeps the full output and shows a warning. A fail
 It retries on the next result, so a provider that recovers is used again without a restart. Failures are not cached.
 Warnings appear at most once per stage per session. The footer shows `degraded` until a later attempt in that stage succeeds.
 Use `/jev-lens stats` to see failure counts and recovery status. Cancellation does not count as a failure.
+The warning names the failure when the SDK does. A reset connection arrives as `TypeError: fetch failed` with the
+reason on its cause, so it reads `Connection failed (TypeError → ECONNRESET)` instead of asking you to report a bug.
+The log keeps more than the warning can: each `presend_error` and `classify_error` event carries a `detail` field with
+the error's name, message, cause (and its code) and the first stack frames, which is what makes a failure answerable
+after the fact. That text appears only in the log — the warning, the footer and the stats stay fixed strings, so no
+provider message reaches the model.
 
 A jev call cannot make the agent wait indefinitely: the pre-send decision has a budget (`JEV_LENS_PRESEND_WAIT_MS`,
 default `5000`). Past it the full text goes through, the request is dropped, and `/jev-lens stats` counts the result as

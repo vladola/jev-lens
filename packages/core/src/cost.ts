@@ -48,13 +48,15 @@ export interface JevCallResult {
  * otherwise. A provider that omits `usage` still counts as a call, with unknown tokens at zero, so a
  * missing field cannot crash a tool result or silently drop the call from the totals.
  */
-export function recordJevCall(meter: JevMeter | undefined, stage: JevStage, result: JevCallResult, ms: number): void {
+export function recordJevCall(meter: JevMeter | undefined, stage: JevStage, result: JevCallResult | undefined, ms: number): void {
 	if (!meter) return;
-	const input = Number(result.usage?.input_tokens ?? 0);
-	const output = Number(result.usage?.output_tokens ?? 0);
+	const usage = result?.usage;
+	const model = result?.model;
+	const input = Number(usage?.input_tokens ?? 0);
+	const output = Number(usage?.output_tokens ?? 0);
 	const inTokens = Number.isFinite(input) ? input : 0;
 	const outTokens = Number.isFinite(output) ? output : 0;
-	const charged = Number(result.usage?.cost);
+	const charged = Number(usage?.cost);
 	const reported = Number.isFinite(charged) && charged >= 0;
 	meter({
 		stage,
@@ -62,7 +64,7 @@ export function recordJevCall(meter: JevMeter | undefined, stage: JevStage, resu
 		output: outTokens,
 		usd: reported ? charged : estimateUsd({ calls: 1, input: inTokens, output: outTokens }, resolveRates()),
 		reported,
-		model: typeof result.model === "string" ? result.model : "",
+		model: typeof model === "string" ? model : "",
 		ms,
 	});
 }
